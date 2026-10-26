@@ -1,5 +1,5 @@
 'use strict';
-// GNOMEKEEP 2.00: dependency-free, low-capacity RFC6455 WebSocket server.
+// GNOMEKEEP 2.04: dependency-free, low-capacity RFC6455 WebSocket server.
 // Designed for a single persistent Node.js instance behind HTTPS/WSS proxy.
 const http=require('node:http');
 const crypto=require('node:crypto');
@@ -51,6 +51,7 @@ function sessionLink(room,p,ws){
 function disconnect(session,ws){
  const room=rooms.get(session.room),p=room?.players.get(session.id);
  if(!p||p.session!==ws)return;p.session=null;p.connected=false;p.disconnectAt=Date.now();
+ if(room.state!=='lobby'&&room.host===p.id){const next=[...room.players.values()].find(q=>q.connected&&q.id!==p.id);if(next)room.host=next.id;}
  if(room.state==='lobby'){
   room.players.delete(p.id);sessions.delete(p.token);
   if(room.host===p.id)room.host=room.players.keys().next().value||null;
@@ -117,16 +118,29 @@ function processMessage(ws,m){
  if(m.type==='promotion_claim'){p.upgrades.shift();return;}
  if(m.type==='end'){
   if(p.alive)engine.killPlayer(room,p,'PLAYER ENDED RUN');
-  if([...room.players.values()].every(q=>!q.alive))room.state='ended';return;
+  if([...room.players.values()].every(q=>!q.alive)){room.state='ended';if(!room.victory)room.outcome='retired';}return;
  }
+ // Hidden QA shortcut is host-only and opt-in on the Render server.
+ if(m.type==='test_portal'){
+  if(process.env.ENABLE_PORTAL_TEST!=='true')return error(ws,'Portal testing disabled on server.');
+  if(room.host!==p.id)return error(ws,'Only the room host can test the portal.');
+  if(room.state!=='playing'||!p.alive)return error(ws,'Portal test requires a living host in an active match.');
+  if(!engine.activatePortalTest(room,p))return error(ws,'Portal test already started or no valid location.');
+  return;
+ }
+ if(m.type==='victory_choice'){if(p.id!==room.host)return error(ws,'Only the host selects the victory result.');if(m.choice!=='endless'&&m.choice!=='finish')return error(ws,'Invalid choice.');engine.finishVictory(room,m.choice);return;}
  if(m.type==='finish_room'&&room.host===p.id){
   for(const q of room.players.values())if(q.alive)engine.killPlayer(room,q,'TEAM ENDED RUN');
-  room.state='ended';return;
+  room.state='ended';if(!room.victory)room.outcome='retired';return;
  }
  if(m.type==='ping'){ws.send({type:'pong',at:Date.now()});return;}
 }
 async function postResults(room){
  if(room.posted)return;room.posted=true;
+ if(room.testMode){
+  room.scorePostStatus='TEST MATCH — results are not saved to the leaderboard.';
+  broadcast(room,{type:'save_status',message:room.scorePostStatus});return;
+ }
  const endpoint=process.env.LEADERBOARD_ENDPOINT||'',secret=process.env.SCORE_API_SECRET||'';
  if(!endpoint||secret.length<32||/CHANGE_THIS|YOUR_/.test(secret)){
   room.scorePostStatus='Online results not configured. Your team score is shown here only.';return;
@@ -134,7 +148,7 @@ async function postResults(room){
  if(!endpoint.startsWith('https://')&&!endpoint.startsWith('http://127.0.0.1:')){
   room.scorePostStatus='Leaderboard endpoint requires HTTPS.';return;
  }
- const payload={match_id:crypto.randomBytes(16).toString('hex'),room_code:room.code,wave:room.wave,
+ const payload={match_id:crypto.randomBytes(16).toString('hex'),room_code:room.code,wave:room.wave,outcome:room.outcome||'defeat',
   players:[...room.players.values()].map(p=>({initials:p.name,score:p.score,kills:p.kills,question_level:p.level,accuracy:p.attempted?Math.round(p.correct*100/p.attempted):0}))};
  const raw=JSON.stringify(payload),timestamp=String(Math.floor(Date.now()/1000)),signature=crypto.createHmac('sha256',secret).update(timestamp+'.'+raw).digest('hex');
  try{
@@ -146,7 +160,7 @@ async function postResults(room){
  broadcast(room,{type:'save_status',message:room.scorePostStatus});
 }
 const server=http.createServer((req,res)=>{
- if(req.url==='/health'){res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({ok:true,version:'2.00',rooms:rooms.size}));return;}
+ if(req.url==='/health'){res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({ok:true,version:'2.04',rooms:rooms.size}));return;}
  res.writeHead(404,{'content-type':'text/plain'});res.end('GNOMEKEEP multiplayer WebSocket service');
 });
 server.on('upgrade',(req,socket,head)=>{
@@ -184,5 +198,5 @@ setInterval(()=>{
   for(const p of room.players.values())if(p.session?.open){p.session.send(engine.view(room,p.id));}
  }
 },100).unref();
-if(require.main===module){server.listen(PORT,'0.0.0.0',()=>console.log(`GNOMEKEEP v2 multiplayer server :${PORT}`));}
+if(require.main===module){server.listen(PORT,'0.0.0.0',()=>console.log(`GNOMEKEEP v2.04 multiplayer server :${PORT}`));}
 module.exports={server,rooms,processMessage,postResults};

@@ -1,8 +1,8 @@
 {
   "name": "gnomekeep-online-server",
-  "version": "2.0.0",
+  "version": "2.4.0",
   "private": true,
-  "description": "GNOMEKEEP v2.00 authoritative co-operative WebSocket server",
+  "description": "GNOMEKEEP v2.04 authoritative co-operative WebSocket server",
   "type": "commonjs",
   "scripts": {"start": "node server.js", "test": "node --test test/*.test.js"},
   "engines": {"node": ">=20"}

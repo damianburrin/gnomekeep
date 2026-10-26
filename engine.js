@@ -121,6 +121,14 @@ function spawn(room){
   room.enemies.push({id:room.nextEnemy++,x:pt.x,y:pt.y,hp:2,ninja:false,heading:rand(0,TWO),phase:rand(0,TWO),
    fireCooldown:rand(.5,2),patrol:{x:anchor.x,y:anchor.y},mode:'patrol',lastSeen:null,squadId:group,groupSlot:slot});
  }
+ // Campaign bosses are strong, server-authoritative enemies, additional to regular guards.
+ if(!room.endless&&(room.wave===5||room.wave===10)){
+   const kind=room.wave===5?'commander':'king',hp=kind==='king'?14:8;
+   const spots=tiles.filter(c=>people.every(p=>dist(c,p)>7)&&room.enemies.every(e=>dist(e,c)>1.5));
+   const pt=spots.length?spots[randInt(0,spots.length-1)]:tiles[tiles.length-1];
+   if(pt)room.enemies.push({id:room.nextEnemy++,x:pt.x,y:pt.y,hp,maxHp:hp,boss:kind,ninja:false,heading:rand(0,TWO),phase:0,
+     fireCooldown:1.2,patrol:{...pt},mode:'hunt',lastSeen:null,squadId:-1,groupSlot:0});
+ }
  const kinds=['ammo','ammo','ammo','ammo','ammo','ammo','med','med','med','food','food','food','food','water','water','water','armour','armour','weapon'];
  for(const kind of kinds){
   const opts=tiles.filter(c=>people.every(p=>dist(c,p)>1.6)&&room.pickups.every(item=>dist(c,item)>1.1));
@@ -137,17 +145,50 @@ function spawn(room){
 function makeRoom(host){
  const initial=makeMap();const room={code:'',host:host.id,players:new Map([[host.id,host]]),state:'lobby',wave:1,
  map:initial.map,vaults:initial.vaults,enemies:[],pickups:[],fields:new Map(),storm:null,events:[],time:0,
- created:Date.now(),updated:Date.now(),eventSeq:0,nextEnemy:1,nextPickup:1,scorePostStatus:'',posted:false,postedAt:0};
+ created:Date.now(),updated:Date.now(),eventSeq:0,nextEnemy:1,nextPickup:1,scorePostStatus:'',posted:false,postedAt:0,portal:null,endless:false,victory:false,testMode:false,outcome:'survived'};
  return room;
 }
+// Spread teammates across the same connected maze instead of overlapping at (1, 1).
+// Farthest-point sampling on shortest walkable paths keeps each spawn reachable.
+function placeTeamSpawns(room){
+ const players=[...room.players.values()];
+ if(!players.length)return [];
+ const origin=reachable(room.map,1,1);
+ const tiles=[];
+ for(let y=1;y<SIZE-1;y++)for(let x=1;x<SIZE-1;x++){
+  if(validTile(room.map,x,y)&&origin[y*SIZE+x]>=0)tiles.push({x,y});
+ }
+ const chosen=[{x:1,y:1}],fields=[reachable(room.map,1,1)];
+ for(let i=1;i<players.length;i++){
+  let best=null,bestScore=-Infinity;
+  for(const tile of tiles){
+   if(chosen.some(p=>p.x===tile.x&&p.y===tile.y))continue;
+   const nearestPath=Math.min(...fields.map(f=>f[tile.y*SIZE+tile.x]));
+   const nearestDirect=Math.min(...chosen.map(p=>Math.hypot(p.x-tile.x,p.y-tile.y)));
+   // Prefer visible geographic separation as well as path distance.
+   const score=nearestDirect>=4?nearestPath+nearestDirect*.35:nearestPath-100;
+   if(score>bestScore){best=tile;bestScore=score;}
+  }
+  if(!best)break;
+  chosen.push(best);fields.push(reachable(room.map,best.x,best.y));
+ }
+ const facings=[[1,0,0],[0,1,Math.PI/2],[-1,0,Math.PI],[0,-1,-Math.PI/2]];
+ players.forEach((p,i)=>{
+  const pt=chosen[i]||chosen[0];p.x=pt.x+.5;p.y=pt.y+.5;
+  const pass=facings.filter(([dx,dy])=>validTile(room.map,pt.x+dx,pt.y+dy));
+  p.a=pass.length?pass[0][2]:0;
+ });
+ return chosen;
+}
 function enterWave(room){
- const {map,vaults}=makeMap();room.map=map;room.vaults=vaults;
+ const {map,vaults}=makeMap();room.map=map;room.vaults=vaults;room.portal=null;
+ placeTeamSpawns(room);
  for(const p of room.players.values()){
-   p.x=1.5;p.y=1.5;p.a=0;p.explored=new Set();p.damageCooldown=1.3;
+   p.explored=new Set();p.damageCooldown=1.3;
  }
  spawn(room);exploreAll(room);room.events.push({type:'wave',wave:room.wave});
 }
-function startRoom(room){if(room.state!=='lobby')return false;room.state='playing';room.wave=1;room.time=0;enterWave(room);return true;}
+function startRoom(room){if(room.state!=='lobby')return false;room.state='playing';room.wave=1;room.time=0;room.portal=null;room.victory=false;room.endless=false;room.testMode=false;enterWave(room);return true;}
 function explore(room,p){
  for(let y=Math.max(0,Math.floor(p.y)-3);y<=Math.min(SIZE-1,Math.floor(p.y)+3);y++){
   for(let x=Math.max(0,Math.floor(p.x)-3);x<=Math.min(SIZE-1,Math.floor(p.x)+3);x++){
@@ -275,7 +316,7 @@ function fire(room,p){
   if(e.hp<=0)continue;const d=dist(p,e),ang=Math.atan2(e.y-p.y,e.x-p.x)-p.a;
   if(d<nearest&&Math.abs(Math.atan2(Math.sin(ang),Math.cos(ang)))<Math.atan2(.32,d)+.04&&traceClear(room,p.x,p.y,e.x,e.y)){nearest=d;target=e;}
  }
- let result='miss';if(target){target.hp--;result=target.hp?'hit':'kill';if(target.hp===0){p.kills++;p.score+=100+20*room.wave;}}
+ let result='miss';if(target){target.hp--;result=target.hp?'hit':'kill';if(target.hp===0){p.kills++;p.score+=target.boss?(target.boss==='king'?2000:800):100+20*room.wave;event(room,{type:'enemy_down',boss:target.boss||null,player:p.id});}}
  event(room,{type:'shot',player:p.id,x:p.x,y:p.y,a:p.a,result,target:target?.id||null});
  if(!p.ammo)openQuiz(p,'ammo');
 }
@@ -332,11 +373,11 @@ function enemyTick(room,dt){
   else if(e.ninja||room.wave>=3){dest=nearest;e.mode='hunt';}
   else if(e.lastSeen){dest=e.lastSeen;e.mode='search';if(dist(e,dest)<.4)e.lastSeen=null;}
   else {e.mode='patrol';if(room.wave===2&&e.groupSlot>0){const leader=room.enemies.find(o=>o.squadId===e.squadId&&o.groupSlot===0&&o.hp>0);if(leader)e.patrol={x:leader.x,y:leader.y};}if(dist(e,e.patrol)<.2){const options=[[1,0],[-1,0],[0,1],[0,-1]].map(([dx,dy])=>({x:Math.floor(e.x)+dx+.5,y:Math.floor(e.y)+dy+.5})).filter(p=>validTile(room.map,Math.floor(p.x),Math.floor(p.y)));if(options.length)e.patrol=options[randInt(0,options.length-1)];}dest=e.patrol;}
-  if(dest&&dist(e,dest)>1.22)stepTowards(room,e,dest,e.ninja?1.55:room.wave>=3?1.08:.74,dt);
+  if(dest&&dist(e,dest)>(e.boss?1.65:1.22))stepTowards(room,e,dest,e.boss?(e.boss==='king'?1.27:1.18):e.ninja?1.55:room.wave>=3?1.08:.74,dt);
   if(seen&&e.fireCooldown<=0){
-   e.fireCooldown=rand(2.1,3.2);
+   e.fireCooldown=e.boss?rand(1.5,2.15):rand(2.1,3.2);
    if(seen.damageCooldown<=0){
-    const damage=seen.armour>0?8:10;
+    const damage=Math.round((e.boss?(e.boss==='king'?20:15):10)*(seen.armour>0?.8:1));
     seen.hp=Math.max(0,seen.hp-damage);seen.damageCooldown=1.25;
     event(room,{type:'hurt',player:seen.id,source:{x:round(e.x),y:round(e.y)},damage});
     if(seen.hp<=0)killPlayer(room,seen,'DEFEATED BY GNOMES');
@@ -344,6 +385,52 @@ function enemyTick(room,dt){
    event(room,{type:'enemy_shot',enemy:e.id,player:seen.id,x:round(e.x),y:round(e.y)});
   }
  }
+}
+function placePortal(room){
+ const living=[...room.players.values()].filter(p=>p.alive);
+ if(!living.length)return;
+ const focus=living[0],field=reachable(room.map,Math.floor(focus.x),Math.floor(focus.y));
+ const spots=[];
+ for(let y=1;y<SIZE-1;y++)for(let x=1;x<SIZE-1;x++){
+  const steps=field[y*SIZE+x];if(validTile(room.map,x,y)&&steps>=3&&steps<=9&&living.every(p=>dist({x:x+.5,y:y+.5},p)>1.6))spots.push({x:x+.5,y:y+.5});
+ }
+ room.portal=spots.length?spots[randInt(0,spots.length-1)]:{x:1.5,y:1.5};
+ event(room,{type:'portal',message:'GNOME KING DEFEATED! FIND THE GOLDEN PORTAL TO WIN!'});
+}
+// Developer-only portal test. Server must explicitly allow this command.
+// This room becomes unranked so testing cannot contaminate the MySQL leaderboard.
+function activatePortalTest(room,p){
+ if(room.state!=='playing'||!p.alive||room.portal||room.testMode)return false;
+ const field=reachable(room.map,Math.floor(p.x),Math.floor(p.y));
+ const spots=[];
+ for(let y=1;y<SIZE-1;y++)for(let x=1;x<SIZE-1;x++){
+  const steps=field[y*SIZE+x],away=Math.hypot(x+.5-p.x,y+.5-p.y);
+  if(validTile(room.map,x,y)&&steps>=2&&steps<=5&&away>=1.2)spots.push({x:x+.5,y:y+.5});
+ }
+ if(!spots.length)return false;
+ const spot=spots[randInt(0,spots.length-1)];
+ room.testMode=true;
+ room.enemies=[];
+ room.storm={phase:'active',delay:0,remaining:0,count:0};
+ room.portal=spot;
+ event(room,{type:'portal',message:'TEST PORTAL READY — WALK INTO THE GOLDEN PORTAL (UNRANKED RUN)'});
+ event(room,{type:'portal_test',message:'PORTAL TEST ENABLED · SCORES WILL NOT BE SAVED'});
+ return true;
+}
+function claimPortal(room,p){
+ if(room.state!=='playing'||!room.portal||!p.alive||dist(room.portal,p)>.46)return false;
+ room.portal=null;room.victory=true;room.outcome='victory';room.state='victory';
+ for(const teammate of room.players.values())if(teammate.alive)teammate.score+=1000;
+ event(room,{type:'victory',message:'THE GNOME KING IS DEFEATED! MISSION COMPLETE · +1000 BONUS'});
+ return true;
+}
+function finishVictory(room,mode){
+ if(room.state!=='victory')return false;
+ if(mode==='endless'){
+   room.endless=true;room.outcome='victory_endless';room.wave=11;room.state='playing';
+   enterWave(room);event(room,{type:'endless',message:'ENDLESS MODE UNLOCKED — WAVE 11'});
+ }else{room.state='ended';room.outcome='victory';room.updated=Date.now();}
+ return true;
 }
 function tick(room,dt){
  if(room.state!=='playing')return;room.time+=dt;room.updated=Date.now();room.events=room.events.filter(e=>Date.now()-e.at<1700);
@@ -357,27 +444,29 @@ function tick(room,dt){
   p.hp=Math.max(0,p.hp-(.04+(p.hunger===0?.17:0)+(p.thirst===0?.17:0))*dt);
   if(p.hp<=0){killPlayer(room,p,'STARVATION OR DEHYDRATION');continue;}
   if(p.time<=0){openQuiz(p,'time');continue;}
-  movePlayer(room,p,dt);
+  movePlayer(room,p,dt);if(room.portal&&claimPortal(room,p))return;
  }
  storm(room,dt);enemyTick(room,dt);
- if(room.enemies.every(e=>e.hp<=0)){
+ if(!room.portal&&room.enemies.every(e=>e.hp<=0)){
   if(room.storm.phase==='pending'){room.storm.delay=0;storm(room,0);}
   else if(room.storm.phase==='active'){
    for(const p of room.players.values())if(p.alive)p.score+=100;
-   room.wave++;enterWave(room);event(room,{type:'waveclear',wave:room.wave-1,bonus:100});
+   if(room.wave===10&&!room.endless){
+     event(room,{type:'waveclear',wave:10,bonus:100});placePortal(room);
+   }else{room.wave++;enterWave(room);event(room,{type:'waveclear',wave:room.wave-1,bonus:100});}
   }
  }
- if([...room.players.values()].every(p=>!p.alive))room.state='ended';
+ if([...room.players.values()].every(p=>!p.alive)){room.state='ended';if(!room.victory)room.outcome='defeat';}
 }
 function view(room,viewer){
  const p=room.players.get(viewer);
  return {type:'snapshot',code:room.code,host:room.host,phase:room.state,wave:room.wave,
   map:room.state==='lobby'?null:room.map, // full collision map for rendering; minimap uses the fog mask only
   vaults:room.vaults.map(v=>({id:v.id,x:v.doorX,y:v.doorY,open:v.open})),
-  enemies:room.enemies.filter(e=>e.hp>0).map(e=>({id:e.id,x:round(e.x),y:round(e.y),hp:e.hp,ninja:e.ninja,phase:round(e.phase)})),
+  enemies:room.enemies.filter(e=>e.hp>0).map(e=>({id:e.id,x:round(e.x),y:round(e.y),hp:e.hp,maxHp:e.maxHp||2,boss:e.boss||null,ninja:e.ninja,phase:round(e.phase)})),
   pickups:room.pickups.filter(i=>!p?.explored||(!i.claimedBy.has(viewer)&&(!p||p.explored.has(Math.floor(i.y)*SIZE+Math.floor(i.x))))).map(i=>({id:i.id,x:i.x,y:i.y,kind:i.kind})),
   players:[...room.players.values()].map(publicPlayer),self:viewer,quiz:p?quizView(p):null,
   promotion:p?.upgrades[0]||null,explored:p?[...p.explored]:[],storm:{phase:room.storm?.phase||'pending',remaining:Math.ceil(room.storm?.remaining||0),alive:room.enemies.filter(e=>e.hp>0&&e.ninja).length},
-  events:room.events};
+  events:room.events,portal:room.portal,testMode:room.testMode,hasWon:room.victory,endless:room.endless,outcome:room.outcome};
 }
-module.exports={SIZE,LEVELS,makeMap,makePlayer,makeRoom,startRoom,enterWave,tick,fire,movePlayer,openQuiz,submitAnswer,nextQuiz,killPlayer,view,randInt,round,publicPlayer,spawn,exploreAll,checkAnswer,fmt,traceClear};
+module.exports={SIZE,LEVELS,makeMap,makePlayer,makeRoom,startRoom,enterWave,tick,fire,movePlayer,openQuiz,submitAnswer,nextQuiz,killPlayer,view,randInt,round,publicPlayer,spawn,exploreAll,checkAnswer,fmt,traceClear,placePortal,claimPortal,finishVictory,placeTeamSpawns,activatePortalTest};
