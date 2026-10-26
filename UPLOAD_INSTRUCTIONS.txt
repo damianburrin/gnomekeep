@@ -1,0 +1,16 @@
+GNOMEKEEP v2.00 - upload the CONTENTS of this archive to the ROOT of https://github.com/damianburrin/gnomekeep
+Do not upload the ZIP itself as a single file: extract it first. Do not upload api/config.php or any secrets to GitHub.
+Render existing service srv-dbf2amjrjlhs739ahvq0 settings:
+  Repository: damianburrin/gnomekeep
+  Branch: main (if your default branch is main)
+  Root Directory: (blank)
+  Runtime: Node
+  Build Command: npm install
+  Start Command: node server.js
+  Health Check Path: /health
+  NODE_ENV=production
+  ALLOWED_ORIGINS=https://gnomekeepmp.gohomework.uk
+  LEADERBOARD_ENDPOINT=https://gnomekeepmp.gohomework.uk/api/submit_online_match.php
+  SCORE_API_SECRET=(exact same long random secret as PHP api/config.php multiplayer_secret)
+Do not manually set PORT unless your host specifically requires it; Render supplies PORT.
+After deployment test https://gnomekeep.onrender.com/health; expected JSON {"ok":true,"version":"2.00","rooms":0}.
